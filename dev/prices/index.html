@@ -9,7 +9,7 @@ get_prices(&quot;AAPL&quot;, range=&quot;1mo&quot;, interval=&quot;1h&quot;)
 
 # Direct to DataFrame
 using DataFrames
-get_prices(&quot;AAPL&quot;, range=&quot;5d&quot;) |&gt; DataFrame</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/AbrJA/YahooFinance.jl/blob/95d0fe556b5d3caa43ba6e61662b0bd81fe429bf/src/prices.jl#L32-L61">source</a></section></details></article><h3 id="Examples"><a class="docs-heading-anchor" href="#Examples">Examples</a><a id="Examples-1"></a><a class="docs-heading-anchor-permalink" href="#Examples" title="Permalink"></a></h3><pre><code class="language-julia hljs"># Daily prices for the last 5 days
+get_prices(&quot;AAPL&quot;, range=&quot;5d&quot;) |&gt; DataFrame</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/AbrJA/YahooFinance.jl/blob/e62351644ea47969eeaa46dc937ac26206947237/src/prices.jl#L32-L61">source</a></section></details></article><h3 id="Examples"><a class="docs-heading-anchor" href="#Examples">Examples</a><a id="Examples-1"></a><a class="docs-heading-anchor-permalink" href="#Examples" title="Permalink"></a></h3><pre><code class="language-julia hljs"># Daily prices for the last 5 days
 prices = get_prices(&quot;AAPL&quot;, range=&quot;5d&quot;)
 prices.close      # Vector{Float64}
 prices.timestamp  # Vector{DateTime}
