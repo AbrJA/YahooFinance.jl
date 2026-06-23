@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Logo/Logo.jpg" width="220" alt="YahooFinance.jl"/>
+  <img src="assets/logo.png" width="220" alt="YahooFinance.jl"/>
 </p>
 
 <h1 align="center">YahooFinance.jl</h1>
