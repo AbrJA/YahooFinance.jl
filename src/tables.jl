@@ -93,24 +93,28 @@ const _OPTION_COLS = (:symbol, :strike, :currency, :last_price, :change,
 
 Tables.columnnames(::OptionChain) = _OPTION_COLS
 
+# Use an iterator to avoid allocating a merged vector per column access
+function _all_contracts(o::OptionChain)
+    return Iterators.flatten((o.calls, o.puts))
+end
+
 function Tables.getcolumn(o::OptionChain, nm::Symbol)
-    contracts = vcat(o.calls, o.puts)
-    nm === :symbol && return [c.symbol for c in contracts]
-    nm === :strike && return [c.strike for c in contracts]
-    nm === :currency && return [c.currency for c in contracts]
-    nm === :last_price && return [c.last_price for c in contracts]
-    nm === :change && return [c.change for c in contracts]
-    nm === :percent_change && return [c.percent_change for c in contracts]
-    nm === :volume && return Union{Missing,Int}[c.volume for c in contracts]
-    nm === :open_interest && return Union{Missing,Int}[c.open_interest for c in contracts]
-    nm === :bid && return [c.bid for c in contracts]
-    nm === :ask && return [c.ask for c in contracts]
-    nm === :contract_size && return [c.contract_size for c in contracts]
-    nm === :expiration && return [c.expiration for c in contracts]
-    nm === :last_trade && return [c.last_trade for c in contracts]
-    nm === :implied_vol && return [c.implied_vol for c in contracts]
-    nm === :in_the_money && return [c.in_the_money for c in contracts]
-    nm === :type && return [c.type for c in contracts]
+    nm === :symbol && return [c.symbol for c in _all_contracts(o)]
+    nm === :strike && return [c.strike for c in _all_contracts(o)]
+    nm === :currency && return [c.currency for c in _all_contracts(o)]
+    nm === :last_price && return [c.last_price for c in _all_contracts(o)]
+    nm === :change && return [c.change for c in _all_contracts(o)]
+    nm === :percent_change && return [c.percent_change for c in _all_contracts(o)]
+    nm === :volume && return Union{Missing,Int}[c.volume for c in _all_contracts(o)]
+    nm === :open_interest && return Union{Missing,Int}[c.open_interest for c in _all_contracts(o)]
+    nm === :bid && return [c.bid for c in _all_contracts(o)]
+    nm === :ask && return [c.ask for c in _all_contracts(o)]
+    nm === :contract_size && return [c.contract_size for c in _all_contracts(o)]
+    nm === :expiration && return [c.expiration for c in _all_contracts(o)]
+    nm === :last_trade && return [c.last_trade for c in _all_contracts(o)]
+    nm === :implied_vol && return [c.implied_vol for c in _all_contracts(o)]
+    nm === :in_the_money && return [c.in_the_money for c in _all_contracts(o)]
+    nm === :type && return [c.type for c in _all_contracts(o)]
     throw(ArgumentError("Unknown column: $nm"))
 end
 

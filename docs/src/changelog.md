@@ -14,12 +14,13 @@
     * `search_news` and `search_symbols` now support `throw_error=false` (consistent with other functions)
     * 100 browser profiles for header rotation (up from 5)
     * JET.jl and Aqua.jl validation in test suite
-    * Comprehensive test coverage (196 tests)
+    * Comprehensive test coverage (193 tests)
 
     ## Performance
     * Type-stable struct returns enable JIT optimization
     * O(1) dividend/split matching via Dict lookup (was O(n²))
-    * Connection pool reset on 429 to prevent cascading failures
+    * Double-checked locking for connection pool (zero contention on hot path)
+    * Zero-allocation iterator for OptionChain column access
 
 !!! info "v0.2.0"
     ## Breaking Changes

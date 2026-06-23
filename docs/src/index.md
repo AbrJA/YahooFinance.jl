@@ -20,7 +20,7 @@ YahooFinance.jl uses Julia's stdlib `Downloads.jl` (libcurl) for HTTP — no ext
 
 - **Connection pooling** — persistent `Downloader` reuses TCP connections
 - **Rate limiting** — automatic throttle (500ms) between requests to avoid Yahoo 429 errors
-- **Retry with exponential backoff** — handles transient failures (5 retries, 2s base delay)
+- **Retry with exponential backoff** — handles transient failures (3 retries, 2s base delay)
 - **Thread-safe session** — cookie/crumb authentication with auto-renewal on 401/403
 - **Minimal dependencies** — only `JSON.jl` and `Tables.jl` (+ stdlib)
 

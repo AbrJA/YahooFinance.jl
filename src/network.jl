@@ -115,6 +115,7 @@ mutable struct YahooSession
 
     # State
     initialized::Bool
+    crumb_failed_at::Float64      # timestamp of last crumb failure (0.0 = never)
     const lock::ReentrantLock
 end
 
@@ -135,6 +136,7 @@ function YahooSession(;
         retry_base_delay,
         nothing,                  # downloader (lazy init)
         false,                    # initialized
+        0.0,                      # crumb_failed_at
         ReentrantLock()
     )
 end
@@ -148,18 +150,37 @@ const _SESSION = YahooSession()
     _get_downloader() -> Downloads.Downloader
 
 Returns the persistent Downloader instance (connection pool).
-Creates one on first use.
+Creates one on first use. Thread-safe (double-checked locking).
 """
 function _get_downloader()::Downloads.Downloader
     dl = _SESSION.downloader
-    if isnothing(dl)
-        dl = Downloads.Downloader()
-        _SESSION.downloader = dl
+    if !isnothing(dl)
+        return dl
     end
-    return dl
+    lock(_SESSION.lock) do
+        dl = _SESSION.downloader
+        if isnothing(dl)
+            dl = Downloads.Downloader()
+            _SESSION.downloader = dl
+        end
+        return dl
+    end
 end
 
 # ─── Session Management ───────────────────────────────────────────────────────
+
+"""Seconds to wait before retrying crumb fetch after a failure."""
+const _CRUMB_COOLDOWN = 120.0
+
+const _CRUMB_URLS = (
+    "https://query2.finance.yahoo.com/v1/test/getcrumb",
+    "https://query1.finance.yahoo.com/v1/test/getcrumb",
+)
+
+const _COOKIE_URLS = (
+    "https://fc.yahoo.com",
+    "https://finance.yahoo.com",
+)
 
 """
     _ensure_session!()
@@ -183,7 +204,8 @@ end
     _renew_session!()
 
 Forces a fresh cookie+crumb fetch regardless of current state.
-Call when receiving 401/403 responses.
+Call when receiving 401/403 responses. Respects crumb cooldown to avoid
+hammering Yahoo when the endpoint is blocked.
 """
 function _renew_session!()
     lock(_SESSION.lock) do
@@ -195,26 +217,52 @@ function _renew_session!()
     return nothing
 end
 
-const _CRUMB_URLS = (
-    "https://query2.finance.yahoo.com/v1/test/getcrumb",
-    "https://query1.finance.yahoo.com/v1/test/getcrumb",
-)
+"""
+    _fetch_cookie!() -> Bool
 
-function _fetch_cookie!()
-    for attempt in 1:2
-        _SESSION.header = _rand_header()
+Fetch session cookies from Yahoo. Tries multiple endpoints.
+Returns `true` if cookies were obtained.
+"""
+function _fetch_cookie!()::Bool
+    for (i, url) in enumerate(_COOKIE_URLS)
         headers = _build_headers(Dict{String,String}())
-        resp = _raw_request("https://fc.yahoo.com"; headers=headers, timeout=10, throw_on_error=false)
+        resp = _raw_request(url; headers=headers, timeout=10, throw_on_error=false)
         if resp.status != 0
-            _SESSION.cookie = _parse_set_cookie(resp.headers)
-            return
+            cookies = _parse_set_cookie(resp.headers)
+            if !isempty(cookies)
+                _SESSION.cookie = cookies
+                return true
+            end
         end
-        attempt < 2 && sleep(2.0)
+        i < length(_COOKIE_URLS) && sleep(1.0)
     end
     _SESSION.cookie = Dict{String,String}()
+    return false
 end
 
-function _fetch_crumb!()
+"""
+    _fetch_crumb!() -> Bool
+
+Fetch the CSRF crumb token from Yahoo. Respects a cooldown period after
+failure to avoid triggering further rate-limits. Returns `true` on success.
+"""
+function _fetch_crumb!()::Bool
+    # Cooldown: skip if we recently failed (avoids hammering a blocked endpoint)
+    if _SESSION.crumb_failed_at > 0.0
+        elapsed = time() - _SESSION.crumb_failed_at
+        if elapsed < _CRUMB_COOLDOWN
+            return false
+        end
+    end
+
+    # Can't get crumb without cookies
+    if isempty(_SESSION.cookie)
+        _SESSION.crumb = ""
+        _SESSION.crumb_failed_at = time()
+        @warn "Cannot fetch crumb: no session cookies obtained from Yahoo."
+        return false
+    end
+
     for attempt in 1:3
         url = _CRUMB_URLS[mod1(attempt, length(_CRUMB_URLS))]
         headers = _build_headers(_SESSION.cookie)
@@ -223,13 +271,19 @@ function _fetch_crumb!()
             crumb = String(resp.body)
             if !isempty(crumb) && !startswith(crumb, "<") && !startswith(crumb, "{")
                 _SESSION.crumb = crumb
-                return
+                _SESSION.crumb_failed_at = 0.0  # reset on success
+                return true
             end
         end
-        attempt < 3 && sleep(min(5.0, 2.0 * attempt))  # 2s, 4s max
+        attempt < 3 && sleep(2.0^attempt)  # 2s, 4s exponential
     end
-    @warn "Yahoo blocked crumb retrieval (likely IP rate-limited). Wait 1-5 minutes. Data requiring authentication will not be available."
+
     _SESSION.crumb = ""
+    _SESSION.crumb_failed_at = time()
+    @warn "Crumb retrieval failed (Yahoo is likely rate-limiting this IP). " *
+          "Endpoints requiring authentication will not work. " *
+          "Will retry automatically after $(_CRUMB_COOLDOWN)s cooldown."
+    return false
 end
 
 # ─── Header Building ─────────────────────────────────────────────────────────
@@ -282,15 +336,26 @@ end
 """
     _throttle!()
 
-Enforces minimum interval between requests.
+Enforces minimum interval between requests. Thread-safe.
+Computes wait time under lock, then sleeps outside the lock to avoid blocking
+other threads.
 """
 function _throttle!()
-    elapsed = time() - _SESSION.last_request_time
-    remaining = _SESSION.min_request_interval - elapsed
-    if remaining > 0.0
-        sleep(remaining)
+    wait_time = lock(_SESSION.lock) do
+        elapsed = time() - _SESSION.last_request_time
+        remaining = _SESSION.min_request_interval - elapsed
+        if remaining > 0.0
+            return remaining
+        end
+        _SESSION.last_request_time = time()
+        return 0.0
     end
-    _SESSION.last_request_time = time()
+    if wait_time > 0.0
+        sleep(wait_time)
+        lock(_SESSION.lock) do
+            _SESSION.last_request_time = time()
+        end
+    end
     return nothing
 end
 
@@ -309,18 +374,18 @@ function _raw_request(url::AbstractString;
     output = IOBuffer()
     downloader = _get_downloader()
 
-    kwargs = Dict{Symbol,Any}(
-        :method => "GET",
-        :headers => headers,
-        :output => output,
-        :timeout => Float64(timeout),
-        :downloader => downloader,
-        :throw => false,
-    )
-    if !isnothing(_SESSION.proxy)
-        kwargs[:proxy] = _SESSION.proxy
+    proxy = _SESSION.proxy
+    resp = if !isnothing(proxy)
+        Downloads.request(url;
+            method="GET", headers=headers, output=output,
+            timeout=Float64(timeout), downloader=downloader,
+            throw=false, proxy=proxy)
+    else
+        Downloads.request(url;
+            method="GET", headers=headers, output=output,
+            timeout=Float64(timeout), downloader=downloader,
+            throw=false)
     end
-    resp = Downloads.request(url; kwargs...)
 
     # Downloads.request with throw=false returns RequestError on connection failures
     if resp isa Downloads.RequestError
@@ -354,49 +419,61 @@ Makes a rate-limited, retrying GET request using the current session.
 """
 function _request(url::AbstractString; timeout::Real=10, throw_on_error::Bool=true)
     _ensure_session!()
-    headers = _build_headers(_SESSION.cookie)
+    headers = lock(_SESSION.lock) do
+        _build_headers(_SESSION.cookie)
+    end
     current_url = String(url)
 
     for attempt in 1:_SESSION.max_retries
         _throttle!()
 
         try
-            return _raw_request(current_url; headers=headers, timeout=timeout, throw_on_error=throw_on_error)
+            # Always throw internally so retry logic works; handle throw_on_error at the end
+            return _raw_request(current_url; headers=headers, timeout=timeout, throw_on_error=true)
         catch e
             is_last = attempt == _SESSION.max_retries
 
             if !(e isa ResponseError)
                 # Network/timeout error — retry with backoff
-                is_last && rethrow()
+                is_last && (throw_on_error ? rethrow() : return _error_response(e))
                 sleep(min(5.0, _SESSION.retry_base_delay * attempt))
                 continue
             end
 
             if e.status == 429
-                # Rate limited — short backoff + renew session identity
-                is_last && rethrow()
-                _SESSION.downloader = nothing
+                # Rate limited — backoff + renew session identity
+                is_last && (throw_on_error ? rethrow() : return (status=e.status, body=e.body, headers=Pair{String,String}[]))
                 _renew_session!()
-                headers = _build_headers(_SESSION.cookie)
+                headers = lock(_SESSION.lock) do
+                    _build_headers(_SESSION.cookie)
+                end
                 current_url = _update_crumb(current_url)
                 sleep(min(5.0, _SESSION.retry_base_delay * attempt))
                 continue
             elseif e.status in (401, 403)
                 # Auth expired — renew and retry
-                is_last && rethrow()
+                is_last && (throw_on_error ? rethrow() : return (status=e.status, body=e.body, headers=Pair{String,String}[]))
                 _renew_session!()
-                headers = _build_headers(_SESSION.cookie)
+                headers = lock(_SESSION.lock) do
+                    _build_headers(_SESSION.cookie)
+                end
                 current_url = _update_crumb(current_url)
                 continue
             else
                 # Other HTTP error — don't retry
-                rethrow()
+                throw_on_error ? rethrow() : return (status=e.status, body=e.body, headers=Pair{String,String}[])
             end
         end
     end
 
     # Unreachable, but satisfies the compiler
     error("Request failed after $(_SESSION.max_retries) attempts: $url")
+end
+
+"""Convert a non-HTTP exception into a response tuple for throw_on_error=false mode."""
+function _error_response(e::Exception)
+    msg = sprint(showerror, e)
+    return (status=0, body=Vector{UInt8}(msg), headers=Pair{String,String}[])
 end
 
 """Replace stale crumb in URL with the current session crumb."""
@@ -416,9 +493,17 @@ Parses Yahoo Finance error response bodies. Handles both JSON and plain-text.
 function _parse_yahoo_error(body::Vector{UInt8}, status::Int, symbol::String="")::String
     try
         yahoo_error = JSON.parse(String(copy(body)))
-        if haskey(yahoo_error, "finance")
+        if haskey(yahoo_error, "finance") &&
+           yahoo_error["finance"] isa AbstractDict &&
+           haskey(yahoo_error["finance"], "error") &&
+           yahoo_error["finance"]["error"] isa AbstractDict &&
+           haskey(yahoo_error["finance"]["error"], "description")
             return string(yahoo_error["finance"]["error"]["description"])
-        elseif haskey(yahoo_error, "chart") && haskey(yahoo_error["chart"], "error")
+        elseif haskey(yahoo_error, "chart") &&
+               yahoo_error["chart"] isa AbstractDict &&
+               haskey(yahoo_error["chart"], "error") &&
+               yahoo_error["chart"]["error"] isa AbstractDict &&
+               haskey(yahoo_error["chart"]["error"], "description")
             desc = string(yahoo_error["chart"]["error"]["description"])
             date_matches = collect(eachmatch(r"(-)?[0-9]{1,}", desc))
             if length(date_matches) >= 2
@@ -431,7 +516,7 @@ function _parse_yahoo_error(body::Vector{UInt8}, status::Int, symbol::String="")
         end
     catch
         text = String(copy(body))
-        return isempty(text) ? "HTTP error $status for $symbol" : strip(text)
+        return isempty(text) ? "HTTP error $status for $symbol" : first(text, 200)
     end
 end
 
